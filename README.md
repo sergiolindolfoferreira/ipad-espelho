@@ -8,7 +8,7 @@ Usa o mesmo mecanismo do QuickTime («Nova gravação de filme» com o iPad como
 
 - Deteta o iPad sozinha quando o ligas ou desligas.
 - A janela segue a proporção do ecrã, também quando rodas o iPad.
-- **Visualização:** Sempre no topo (⌘T), Tamanho real (⌘1), Ecrã inteiro (⌘F).
+- **Visualização:** Sempre no topo (⌘T), Tamanho real (⌘1), Ajustar ao ecrã (⌘2), Ecrã inteiro (⌘F).
 - **Dispositivo:** escolher entre vários dispositivos, Procurar de novo (⌘R).
 
 ## Compilar

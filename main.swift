@@ -50,14 +50,31 @@ final class EcraView: NSView {
     }
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, AVCaptureVideoDataOutputSampleBufferDelegate {
     var janela: NSWindow!
     let vista = EcraView(frame: NSRect(x: 0, y: 0, width: 600, height: 800))
     let sessao = AVCaptureSession()
     var dispositivoAtual: AVCaptureDevice?
     var menuDispositivos = NSMenu(title: "Dispositivo")
     var itemSempreNoTopo: NSMenuItem!
-    var observadorFormato: NSObjectProtocol?
+    // O iPad é um dispositivo "muxed" e o activeFormat diz 0×0;
+    // as dimensões reais só se conhecem pelas imagens que chegam.
+    let saidaVideo = AVCaptureVideoDataOutput()
+    let filaVideo = DispatchQueue(label: "ipad-espelho.video")
+    var ultimaDimensaoFila = CGSize.zero   // só usada na filaVideo
+    var dimensaoAtual = CGSize.zero        // só usada na main
+
+    func captureOutput(_ output: AVCaptureOutput, didOutput sb: CMSampleBuffer, from connection: AVCaptureConnection) {
+        guard let fd = CMSampleBufferGetFormatDescription(sb) else { return }
+        let d = CMVideoFormatDescriptionGetDimensions(fd)
+        let tamanho = CGSize(width: CGFloat(d.width), height: CGFloat(d.height))
+        guard tamanho.width > 0, tamanho.height > 0, tamanho != ultimaDimensaoFila else { return }
+        ultimaDimensaoFila = tamanho
+        DispatchQueue.main.async {
+            self.dimensaoAtual = tamanho
+            self.ajustarProporcao()
+        }
+    }
 
     func applicationDidFinishLaunching(_ n: Notification) {
         construirMenu()
@@ -67,6 +84,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         janela.title = "iPad Espelho"
         janela.contentView = vista
         janela.delegate = self
+        janela.contentMinSize = NSSize(width: 240, height: 240)
         janela.setFrameAutosaveName("JanelaiPadEspelho")
         janela.center()
         janela.makeKeyAndOrderFront(nil)
@@ -119,19 +137,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             mostrarAviso("Não consegui abrir \(d.localizedName):\n\(error.localizedDescription)")
             return
         }
+        // A saída de vídeo dá-nos o tamanho real de cada imagem (e avisa quando o iPad roda).
+        if !sessao.outputs.contains(saidaVideo) {
+            saidaVideo.alwaysDiscardsLateVideoFrames = true
+            saidaVideo.setSampleBufferDelegate(self, queue: filaVideo)
+            if sessao.canAddOutput(saidaVideo) { sessao.addOutput(saidaVideo) }
+        }
         sessao.commitConfiguration()
+        filaVideo.async { self.ultimaDimensaoFila = .zero }
+        dimensaoAtual = .zero
         dispositivoAtual = d
         janela.title = d.localizedName
         mostrarAviso(nil)
         DispatchQueue.global(qos: .userInitiated).async { self.sessao.startRunning() }
-
-        // Ajusta a janela à proporção do ecrã (e quando o iPad roda).
-        if let o = observadorFormato { NotificationCenter.default.removeObserver(o) }
-        observadorFormato = NotificationCenter.default.addObserver(
-            forName: AVCaptureInput.Port.formatDescriptionDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
-            self?.ajustarProporcao()
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.ajustarProporcao() }
         reconstruirMenuDispositivos(dispositivosiOS())
     }
 
@@ -139,16 +157,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if sessao.isRunning { sessao.stopRunning() }
         sessao.inputs.forEach { sessao.removeInput($0) }
         dispositivoAtual = nil
+        dimensaoAtual = .zero
         janela.title = "iPad Espelho"
         janela.contentAspectRatio = .zero
         mostrarAviso("Liga o iPad ao Mac por cabo USB‑C,\ndesbloqueia-o e toca em «Confiar» se te for pedido.")
     }
 
     func ajustarProporcao() {
-        guard let d = dispositivoAtual else { return }
-        let dim = CMVideoFormatDescriptionGetDimensions(d.activeFormat.formatDescription)
-        guard dim.width > 0, dim.height > 0 else { return }
-        let proporcao = NSSize(width: CGFloat(dim.width), height: CGFloat(dim.height))
+        guard dispositivoAtual != nil, dimensaoAtual.width > 0, !janela.styleMask.contains(.fullScreen) else { return }
+        let proporcao = dimensaoAtual
         janela.contentAspectRatio = proporcao
 
         // Mantém a área e o centro, mudando só a forma.
@@ -192,6 +209,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         itemSempreNoTopo = NSMenuItem(title: "Sempre no topo", action: #selector(alternarTopo), keyEquivalent: "t")
         visMenu.addItem(itemSempreNoTopo)
         visMenu.addItem(withTitle: "Tamanho real (1:1)", action: #selector(tamanhoReal), keyEquivalent: "1")
+        visMenu.addItem(withTitle: "Ajustar ao ecrã", action: #selector(ajustarAoEcra), keyEquivalent: "2")
         visMenu.addItem(withTitle: "Ecrã inteiro", action: #selector(NSWindow.toggleFullScreen(_:)), keyEquivalent: "f")
         visItem.submenu = visMenu
 
@@ -239,12 +257,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         itemSempreNoTopo.state = janela.level == .floating ? .on : .off
     }
 
-    @objc func tamanhoReal() {
-        guard let d = dispositivoAtual else { return }
-        let dim = CMVideoFormatDescriptionGetDimensions(d.activeFormat.formatDescription)
-        let escala = janela.backingScaleFactor
-        var c = janela.contentRect(forFrameRect: janela.frame)
-        c.size = NSSize(width: CGFloat(dim.width) / escala, height: CGFloat(dim.height) / escala)
+    // O iPad envia imagens já à escala dos seus pontos (ex.: 1600×1200 num iPad de 13"),
+    // por isso 1 pixel da imagem = 1 ponto no Mac dá o tamanho do iPad.
+    @objc func tamanhoReal() { redimensionar(paraEcra: false) }
+    @objc func ajustarAoEcra() { redimensionar(paraEcra: true) }
+
+    func redimensionar(paraEcra: Bool) {
+        guard dispositivoAtual != nil, dimensaoAtual.width > 0, !janela.styleMask.contains(.fullScreen) else { return }
+        var largura = dimensaoAtual.width
+        var altura = dimensaoAtual.height
+        if paraEcra { largura *= 100; altura *= 100 }  // o limite do ecrã em baixo trata do resto
+        // Se não couber no ecrã, encolhe o mínimo necessário (mantendo a proporção).
+        if let ecra = janela.screen?.visibleFrame {
+            let barraTitulo = janela.frame.height - janela.contentRect(forFrameRect: janela.frame).height
+            let f = min(1, ecra.width / largura, (ecra.height - barraTitulo) / altura)
+            largura *= f; altura *= f
+        }
+        let atual = janela.contentRect(forFrameRect: janela.frame)
+        var c = NSRect(x: atual.midX - largura / 2, y: atual.maxY - altura, width: largura, height: altura)
+        if let ecra = janela.screen?.visibleFrame {
+            var f = janela.frameRect(forContentRect: c)
+            f.origin.x = max(ecra.minX, min(f.origin.x, ecra.maxX - f.width))
+            f.origin.y = max(ecra.minY, min(f.origin.y, ecra.maxY - f.height))
+            c = janela.contentRect(forFrameRect: f)
+        }
         janela.setFrame(janela.frameRect(forContentRect: c), display: true, animate: true)
     }
 }
